@@ -1,4 +1,4 @@
-name: "SmartHop Backfill"
+name: "Backfill - SmartHop"
 version: "0.1.5"
 slug: "backfill"
 description: "Automatic backfill of Home Assistant history to InfluxDB."
