@@ -32,14 +32,11 @@ def ha_headers():
 
 
 def get_history(entity_id, start, end):
-    start_text = start.strftime("%Y-%m-%dT%H:%M:%S%z")
-    end_text = end.strftime("%Y-%m-%dT%H:%M:%S%z")
-
-    url = f"{HA_API}/history/period/{start_text}"
+    url = f"{HA_API}/history/period/{start.isoformat()}"
 
     params = {
         "filter_entity_id": entity_id,
-        "end_time": end_text,
+        "end_time": end.isoformat(),
         "minimal_response": "false",
         "no_attributes": "true",
     }
@@ -131,8 +128,9 @@ def build_line(entity_id, site, state, timestamp):
     measurement = "energy"
 
     tags = (
-        f"site={escape_tag(site)},"
-        f"entity_id={escape_tag(entity_id)}"
+        f"domain=sensor,"
+        f"entity_id={escape_tag(entity_id)},"
+        f"site={escape_tag(site)}"
     )
 
     timestamp_ns = int(timestamp.timestamp() * 1_000_000_000)
