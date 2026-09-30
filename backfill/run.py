@@ -1,3 +1,5 @@
+import csv
+import io
 import json
 import os
 import time
@@ -18,6 +20,10 @@ def load_options():
     with open(OPTIONS_FILE, "r", encoding="utf-8") as file:
         return json.load(file)
 
+
+# ---------------------------------------------------------
+# HOME ASSISTANT
+# ---------------------------------------------------------
 
 def ha_headers():
     token = os.environ.get("SUPERVISOR_TOKEN")
@@ -58,6 +64,10 @@ def get_history(entity_id, start, end):
     return data[0]
 
 
+# ---------------------------------------------------------
+# TIMESTAMP
+# ---------------------------------------------------------
+
 def parse_timestamp(value):
     if not value:
         return None
@@ -73,6 +83,115 @@ def parse_timestamp(value):
         dt = dt.replace(tzinfo=timezone.utc)
 
     return dt.astimezone(timezone.utc)
+
+
+# ---------------------------------------------------------
+# INFLUX
+# ---------------------------------------------------------
+
+def influx_headers(token, content_type=None):
+    headers = {
+        "Authorization": f"Token {token}",
+    }
+
+    if content_type:
+        headers["Content-Type"] = content_type
+
+    return headers
+
+
+def get_existing_timestamps(options, entity_id, start, end):
+    """
+    Pobiera z Influx wszystkie istniejące timestampy
+    dla konkretnej encji.
+
+    HA entity:
+        sensor.lub_pil_6_le10_r264
+
+    Influx entity_id:
+        lub_pil_6_le10_r264
+    """
+
+    influx_url = options["influx_url"].rstrip("/")
+    organization = options["influx_org"]
+    bucket = options["influx_bucket"]
+    token = options["influx_token"]
+    site = options["site"]
+
+    # Influx używa entity_id BEZ "sensor."
+    influx_entity_id = entity_id
+
+    if influx_entity_id.startswith("sensor."):
+        influx_entity_id = influx_entity_id[len("sensor."):]
+
+    query = f'''
+from(bucket: "{bucket}")
+  |> range(
+      start: {start.isoformat()},
+      stop: {end.isoformat()}
+    )
+  |> filter(fn: (r) => r["_measurement"] == "energy")
+  |> filter(fn: (r) => r["_field"] == "value")
+  |> filter(fn: (r) => r["domain"] == "sensor")
+  |> filter(fn: (r) => r["entity_id"] == "{influx_entity_id}")
+  |> filter(fn: (r) => r["site"] == "{site}")
+  |> keep(columns: ["_time"])
+'''
+
+    url = f"{influx_url}/api/v2/query"
+
+    params = {
+        "org": organization,
+    }
+
+    headers = influx_headers(
+        token,
+        "application/vnd.flux",
+    )
+
+    response = requests.post(
+        url,
+        params=params,
+        headers=headers,
+        data=query,
+        timeout=120,
+    )
+
+    if response.status_code >= 300:
+        raise RuntimeError(
+            f"Influx query HTTP {response.status_code}: "
+            f"{response.text}"
+        )
+
+    existing = set()
+
+    # Influx zwraca CSV z wierszami #group/#datatype/#default.
+    lines = response.text.splitlines()
+
+    csv_lines = [
+        line for line in lines
+        if line and not line.startswith("#")
+    ]
+
+    if not csv_lines:
+        return existing
+
+    reader = csv.DictReader(
+        io.StringIO("\n".join(csv_lines))
+    )
+
+    for row in reader:
+        value = row.get("_time")
+
+        if not value:
+            continue
+
+        timestamp = parse_timestamp(value)
+
+        if timestamp:
+            existing.add(timestamp)
+
+    return existing
 
 
 def escape_tag(value):
@@ -118,22 +237,41 @@ def write_to_influx(options, points):
 
     if response.status_code >= 300:
         raise RuntimeError(
-            f"InfluxDB HTTP {response.status_code}: {response.text}"
+            f"InfluxDB HTTP {response.status_code}: "
+            f"{response.text}"
         )
 
+
+# ---------------------------------------------------------
+# LINE PROTOCOL
+# ---------------------------------------------------------
 
 def build_line(entity_id, site, state, timestamp):
     value = float(state)
 
     measurement = "energy"
 
+    # WAŻNE:
+    # HA entity_id:
+    # sensor.lub_pil_6_le10_r264
+    #
+    # Influx entity_id:
+    # lub_pil_6_le10_r264
+
+    influx_entity_id = entity_id
+
+    if influx_entity_id.startswith("sensor."):
+        influx_entity_id = influx_entity_id[len("sensor."):]
+
     tags = (
         f"domain=sensor,"
-        f"entity_id={escape_tag(entity_id)},"
+        f"entity_id={escape_tag(influx_entity_id)},"
         f"site={escape_tag(site)}"
     )
 
-    timestamp_ns = int(timestamp.timestamp() * 1_000_000_000)
+    timestamp_ns = int(
+        timestamp.timestamp() * 1_000_000_000
+    )
 
     return (
         f"{measurement},{tags} "
@@ -141,6 +279,10 @@ def build_line(entity_id, site, state, timestamp):
         f"{timestamp_ns}"
     )
 
+
+# ---------------------------------------------------------
+# BACKFILL
+# ---------------------------------------------------------
 
 def backfill_entity(options, entity_id):
     days = int(options.get("days", 30))
@@ -154,14 +296,50 @@ def backfill_entity(options, entity_id):
         f"{start.isoformat()} -> {end.isoformat()}"
     )
 
-    history = get_history(entity_id, start, end)
+    # 1. Pobierz historię z HA
+    history = get_history(
+        entity_id,
+        start,
+        end,
+    )
 
+    log(
+        f"{entity_id}: HA zwrócił "
+        f"{len(history)} rekordów"
+    )
+
+    if not history:
+        log(
+            f"{entity_id}: brak danych w historii HA"
+        )
+        return
+
+    # 2. Pobierz istniejące punkty z Influx
+    existing_timestamps = get_existing_timestamps(
+        options,
+        entity_id,
+        start,
+        end,
+    )
+
+    log(
+        f"{entity_id}: w Influx istnieje "
+        f"{len(existing_timestamps)} punktów"
+    )
+
+    # 3. Przygotuj TYLKO brakujące punkty
     lines = []
+    missing_timestamps = []
 
     for item in history:
         state = item.get("state")
 
-        if state in (None, "", "unknown", "unavailable"):
+        if state in (
+            None,
+            "",
+            "unknown",
+            "unavailable",
+        ):
             continue
 
         try:
@@ -170,10 +348,15 @@ def backfill_entity(options, entity_id):
             continue
 
         timestamp = parse_timestamp(
-            item.get("last_updated") or item.get("last_changed")
+            item.get("last_updated")
+            or item.get("last_changed")
         )
 
         if timestamp is None:
+            continue
+
+        # Punkt już istnieje -> pomijamy
+        if timestamp in existing_timestamps:
             continue
 
         lines.append(
@@ -185,17 +368,40 @@ def backfill_entity(options, entity_id):
             )
         )
 
+        missing_timestamps.append(timestamp)
+
+    # 4. Nic nie brakuje
     if not lines:
-        log(f"{entity_id}: brak danych do zapisania")
+        log(
+            f"{entity_id}: brak brakujących punktów"
+        )
         return
 
-    write_to_influx(options, lines)
-
-    log(
-        f"{entity_id}: zapisano/uzupełniono "
-        f"{len(lines)} punktów"
+    # 5. Zapis tylko brakujących punktów
+    write_to_influx(
+        options,
+        lines,
     )
 
+    log(
+        f"{entity_id}: uzupełniono "
+        f"{len(lines)} brakujących punktów"
+    )
+
+    if missing_timestamps:
+        first = min(missing_timestamps)
+        last = max(missing_timestamps)
+
+        log(
+            f"{entity_id}: zakres uzupełnienia "
+            f"{first.isoformat()} -> "
+            f"{last.isoformat()}"
+        )
+
+
+# ---------------------------------------------------------
+# MAIN BACKFILL
+# ---------------------------------------------------------
 
 def run_backfill():
     options = load_options()
@@ -208,14 +414,22 @@ def run_backfill():
 
     for entity_id in entities:
         try:
-            backfill_entity(options, entity_id)
+            backfill_entity(
+                options,
+                entity_id,
+            )
         except Exception as error:
-            log(f"BŁĄD {entity_id}: {error}")
+            log(
+                f"BŁĄD {entity_id}: {error}"
+            )
 
 
 def main():
     interval_days = int(
-        load_options().get("interval_days", 7)
+        load_options().get(
+            "interval_days",
+            7,
+        )
     )
 
     while True:
@@ -224,14 +438,18 @@ def main():
         try:
             run_backfill()
         except Exception as error:
-            log(f"BŁĄD GŁÓWNY: {error}")
+            log(
+                f"BŁĄD GŁÓWNY: {error}"
+            )
 
         log(
             f"Następny backfill za "
             f"{interval_days} dni"
         )
 
-        time.sleep(interval_days * 24 * 60 * 60)
+        time.sleep(
+            interval_days * 24 * 60 * 60
+        )
 
 
 if __name__ == "__main__":
