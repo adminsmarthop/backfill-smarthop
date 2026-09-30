@@ -85,6 +85,19 @@ def parse_timestamp(value):
     return dt.astimezone(timezone.utc)
 
 
+def normalize_timestamp(timestamp):
+    """
+    Normalizuje timestamp do milisekund.
+
+    Dzięki temu drobne różnice precyzji pomiędzy
+    Home Assistant i InfluxDB nie powodują ponownego
+    uznania tego samego punktu za brakujący.
+    """
+    return timestamp.replace(
+        microsecond=(timestamp.microsecond // 1000) * 1000
+    )
+
+
 # ---------------------------------------------------------
 # INFLUX
 # ---------------------------------------------------------
@@ -101,24 +114,12 @@ def influx_headers(token, content_type=None):
 
 
 def get_existing_timestamps(options, entity_id, start, end):
-    """
-    Pobiera z Influx wszystkie istniejące timestampy
-    dla konkretnej encji.
-
-    HA entity:
-        sensor.lub_pil_6_le10_r264
-
-    Influx entity_id:
-        lub_pil_6_le10_r264
-    """
-
     influx_url = options["influx_url"].rstrip("/")
     organization = options["influx_org"]
     bucket = options["influx_bucket"]
     token = options["influx_token"]
     site = options["site"]
 
-    # Influx używa entity_id BEZ "sensor."
     influx_entity_id = entity_id
 
     if influx_entity_id.startswith("sensor."):
@@ -165,7 +166,6 @@ from(bucket: "{bucket}")
 
     existing = set()
 
-    # Influx zwraca CSV z wierszami #group/#datatype/#default.
     lines = response.text.splitlines()
 
     csv_lines = [
@@ -189,7 +189,9 @@ from(bucket: "{bucket}")
         timestamp = parse_timestamp(value)
 
         if timestamp:
-            existing.add(timestamp)
+            existing.add(
+                normalize_timestamp(timestamp)
+            )
 
     return existing
 
@@ -251,13 +253,6 @@ def build_line(entity_id, site, state, timestamp):
 
     measurement = "energy"
 
-    # WAŻNE:
-    # HA entity_id:
-    # sensor.lub_pil_6_le10_r264
-    #
-    # Influx entity_id:
-    # lub_pil_6_le10_r264
-
     influx_entity_id = entity_id
 
     if influx_entity_id.startswith("sensor."):
@@ -296,7 +291,7 @@ def backfill_entity(options, entity_id):
         f"{start.isoformat()} -> {end.isoformat()}"
     )
 
-    # 1. Pobierz historię z HA
+    # 1. Historia HA
     history = get_history(
         entity_id,
         start,
@@ -314,7 +309,7 @@ def backfill_entity(options, entity_id):
         )
         return
 
-    # 2. Pobierz istniejące punkty z Influx
+    # 2. Istniejące timestampy w Influx
     existing_timestamps = get_existing_timestamps(
         options,
         entity_id,
@@ -327,9 +322,8 @@ def backfill_entity(options, entity_id):
         f"{len(existing_timestamps)} punktów"
     )
 
-    # 3. Przygotuj TYLKO brakujące punkty
-    lines = []
-    missing_timestamps = []
+    # 3. Deduplikacja danych HA
+    history_by_timestamp = {}
 
     for item in history:
         state = item.get("state")
@@ -355,8 +349,25 @@ def backfill_entity(options, entity_id):
         if timestamp is None:
             continue
 
-        # Punkt już istnieje -> pomijamy
-        if timestamp in existing_timestamps:
+        normalized = normalize_timestamp(timestamp)
+
+        # Jeżeli HA zwróci ten sam timestamp więcej niż raz,
+        # zostawiamy ostatnią wartość.
+        history_by_timestamp[normalized] = (
+            state,
+            timestamp,
+        )
+
+    # 4. Tylko naprawdę brakujące punkty
+    lines = []
+    missing_timestamps = []
+
+    for normalized_timestamp, (
+        state,
+        timestamp,
+    ) in history_by_timestamp.items():
+
+        if normalized_timestamp in existing_timestamps:
             continue
 
         lines.append(
@@ -370,14 +381,15 @@ def backfill_entity(options, entity_id):
 
         missing_timestamps.append(timestamp)
 
-    # 4. Nic nie brakuje
+    # 5. Nic nie brakuje
     if not lines:
         log(
-            f"{entity_id}: brak brakujących punktów"
+            f"{entity_id}: "
+            f"brak brakujących punktów"
         )
         return
 
-    # 5. Zapis tylko brakujących punktów
+    # 6. Zapis
     write_to_influx(
         options,
         lines,
@@ -400,7 +412,7 @@ def backfill_entity(options, entity_id):
 
 
 # ---------------------------------------------------------
-# MAIN BACKFILL
+# MAIN
 # ---------------------------------------------------------
 
 def run_backfill():
