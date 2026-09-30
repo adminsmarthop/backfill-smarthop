@@ -21,10 +21,6 @@ def load_options():
         return json.load(file)
 
 
-# ---------------------------------------------------------
-# HOME ASSISTANT
-# ---------------------------------------------------------
-
 def ha_headers():
     token = os.environ.get("SUPERVISOR_TOKEN")
 
@@ -64,10 +60,6 @@ def get_history(entity_id, start, end):
     return data[0]
 
 
-# ---------------------------------------------------------
-# TIMESTAMP
-# ---------------------------------------------------------
-
 def parse_timestamp(value):
     if not value:
         return None
@@ -87,20 +79,14 @@ def parse_timestamp(value):
 
 def normalize_timestamp(timestamp):
     """
-    Normalizuje timestamp do milisekund.
-
-    Dzięki temu drobne różnice precyzji pomiędzy
-    Home Assistant i InfluxDB nie powodują ponownego
-    uznania tego samego punktu za brakujący.
+    Influx zapisujemy z nanosekundami,
+    ale porównujemy timestampy z dokładnością do milisekundy.
     """
+
     return timestamp.replace(
         microsecond=(timestamp.microsecond // 1000) * 1000
     )
 
-
-# ---------------------------------------------------------
-# INFLUX
-# ---------------------------------------------------------
 
 def influx_headers(token, content_type=None):
     headers = {
@@ -114,6 +100,15 @@ def influx_headers(token, content_type=None):
 
 
 def get_existing_timestamps(options, entity_id, start, end):
+    """
+    Pobiera wszystkie timestampy istniejące już w InfluxDB
+    dla konkretnej encji.
+
+    Ważne:
+    - HA entity_id może być np. sensor.lub_pil_6_le10_r264
+    - w Influx entity_id jest lub_pil_6_le10_r264
+    """
+
     influx_url = options["influx_url"].rstrip("/")
     organization = options["influx_org"]
     bucket = options["influx_bucket"]
@@ -166,21 +161,73 @@ from(bucket: "{bucket}")
 
     existing = set()
 
-    lines = response.text.splitlines()
+    # ---------------------------------------------------------
+    # InfluxDB zwraca CSV z komentarzami/metadata.
+    # Usuwamy linie komentarzy i puste linie.
+    # ---------------------------------------------------------
 
-    csv_lines = [
-        line for line in lines
-        if line and not line.startswith("#")
-    ]
+    raw_lines = response.text.splitlines()
+
+    csv_lines = []
+
+    for line in raw_lines:
+        line = line.strip()
+
+        if not line:
+            continue
+
+        if line.startswith("#"):
+            continue
+
+        csv_lines.append(line)
 
     if not csv_lines:
         return existing
 
-    reader = csv.DictReader(
-        io.StringIO("\n".join(csv_lines))
-    )
+    # ---------------------------------------------------------
+    # Obsługa wielu tabel CSV.
+    #
+    # Influx może zwrócić więcej niż jeden nagłówek:
+    #
+    # _time
+    # ...
+    #
+    # _time
+    # ...
+    #
+    # Dlatego nie zakładamy, że cały wynik jest jednym
+    # klasycznym CSV.
+    # ---------------------------------------------------------
 
-    for row in reader:
+    header = None
+
+    for line in csv_lines:
+
+        # Szukamy nagłówka zawierającego _time.
+        if "_time" in line.split(","):
+
+            header = line.split(",")
+
+            continue
+
+        # Jeżeli nie znaleźliśmy jeszcze nagłówka,
+        # pomijamy linię.
+        if header is None:
+            continue
+
+        values = next(
+            csv.reader(
+                io.StringIO(line)
+            )
+        )
+
+        if len(values) != len(header):
+            continue
+
+        row = dict(
+            zip(header, values)
+        )
+
         value = row.get("_time")
 
         if not value:
@@ -188,10 +235,14 @@ from(bucket: "{bucket}")
 
         timestamp = parse_timestamp(value)
 
-        if timestamp:
-            existing.add(
-                normalize_timestamp(timestamp)
-            )
+        if timestamp is None:
+            continue
+
+        normalized = normalize_timestamp(
+            timestamp
+        )
+
+        existing.add(normalized)
 
     return existing
 
@@ -213,7 +264,9 @@ def write_to_influx(options, points):
     token = options["influx_token"]
 
     if not token:
-        raise RuntimeError("Brak tokenu InfluxDB")
+        raise RuntimeError(
+            "Brak tokenu InfluxDB"
+        )
 
     url = f"{influx_url}/api/v2/write"
 
@@ -244,10 +297,6 @@ def write_to_influx(options, points):
         )
 
 
-# ---------------------------------------------------------
-# LINE PROTOCOL
-# ---------------------------------------------------------
-
 def build_line(entity_id, site, state, timestamp):
     value = float(state)
 
@@ -275,23 +324,34 @@ def build_line(entity_id, site, state, timestamp):
     )
 
 
-# ---------------------------------------------------------
-# BACKFILL
-# ---------------------------------------------------------
-
 def backfill_entity(options, entity_id):
-    days = int(options.get("days", 30))
+    days = int(
+        options.get(
+            "days",
+            30,
+        )
+    )
+
     site = options["site"]
 
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
+    end = datetime.now(
+        timezone.utc
+    )
+
+    start = end - timedelta(
+        days=days
+    )
 
     log(
         f"Backfill {entity_id}: "
-        f"{start.isoformat()} -> {end.isoformat()}"
+        f"{start.isoformat()} -> "
+        f"{end.isoformat()}"
     )
 
-    # 1. Historia HA
+    # ---------------------------------------------------------
+    # 1. Pobierz historię z Home Assistant
+    # ---------------------------------------------------------
+
     history = get_history(
         entity_id,
         start,
@@ -305,16 +365,23 @@ def backfill_entity(options, entity_id):
 
     if not history:
         log(
-            f"{entity_id}: brak danych w historii HA"
+            f"{entity_id}: brak danych "
+            f"w historii HA"
         )
+
         return
 
-    # 2. Istniejące timestampy w Influx
-    existing_timestamps = get_existing_timestamps(
-        options,
-        entity_id,
-        start,
-        end,
+    # ---------------------------------------------------------
+    # 2. Pobierz istniejące timestampy z Influx
+    # ---------------------------------------------------------
+
+    existing_timestamps = (
+        get_existing_timestamps(
+            options,
+            entity_id,
+            start,
+            end,
+        )
     )
 
     log(
@@ -322,11 +389,20 @@ def backfill_entity(options, entity_id):
         f"{len(existing_timestamps)} punktów"
     )
 
-    # 3. Deduplikacja danych HA
+    # ---------------------------------------------------------
+    # 3. Przygotuj dane z HA
+    #
+    # Jeżeli HA zwróci ten sam timestamp więcej niż raz,
+    # zostawiamy jeden punkt.
+    # ---------------------------------------------------------
+
     history_by_timestamp = {}
 
     for item in history:
-        state = item.get("state")
+
+        state = item.get(
+            "state"
+        )
 
         if state in (
             None,
@@ -338,36 +414,55 @@ def backfill_entity(options, entity_id):
 
         try:
             float(state)
-        except (TypeError, ValueError):
+        except (
+            TypeError,
+            ValueError,
+        ):
             continue
 
         timestamp = parse_timestamp(
-            item.get("last_updated")
-            or item.get("last_changed")
+            item.get(
+                "last_updated"
+            )
+            or item.get(
+                "last_changed"
+            )
         )
 
         if timestamp is None:
             continue
 
-        normalized = normalize_timestamp(timestamp)
+        normalized = normalize_timestamp(
+            timestamp
+        )
 
-        # Jeżeli HA zwróci ten sam timestamp więcej niż raz,
-        # zostawiamy ostatnią wartość.
-        history_by_timestamp[normalized] = (
+        history_by_timestamp[
+            normalized
+        ] = (
             state,
             timestamp,
         )
 
-    # 4. Tylko naprawdę brakujące punkty
+    # ---------------------------------------------------------
+    # 4. Znajdź tylko punkty, których NIE MA w Influx
+    # ---------------------------------------------------------
+
     lines = []
+
     missing_timestamps = []
 
-    for normalized_timestamp, (
-        state,
-        timestamp,
+    for (
+        normalized_timestamp,
+        (
+            state,
+            timestamp,
+        ),
     ) in history_by_timestamp.items():
 
-        if normalized_timestamp in existing_timestamps:
+        if (
+            normalized_timestamp
+            in existing_timestamps
+        ):
             continue
 
         lines.append(
@@ -379,17 +474,27 @@ def backfill_entity(options, entity_id):
             )
         )
 
-        missing_timestamps.append(timestamp)
+        missing_timestamps.append(
+            timestamp
+        )
 
+    # ---------------------------------------------------------
     # 5. Nic nie brakuje
+    # ---------------------------------------------------------
+
     if not lines:
+
         log(
             f"{entity_id}: "
             f"brak brakujących punktów"
         )
+
         return
 
-    # 6. Zapis
+    # ---------------------------------------------------------
+    # 6. Zapis brakujących punktów do Influx
+    # ---------------------------------------------------------
+
     write_to_influx(
         options,
         lines,
@@ -400,43 +505,63 @@ def backfill_entity(options, entity_id):
         f"{len(lines)} brakujących punktów"
     )
 
+    # ---------------------------------------------------------
+    # 7. Log zakresu uzupełnienia
+    # ---------------------------------------------------------
+
     if missing_timestamps:
-        first = min(missing_timestamps)
-        last = max(missing_timestamps)
+
+        first = min(
+            missing_timestamps
+        )
+
+        last = max(
+            missing_timestamps
+        )
 
         log(
-            f"{entity_id}: zakres uzupełnienia "
+            f"{entity_id}: zakres "
+            f"uzupełnienia "
             f"{first.isoformat()} -> "
             f"{last.isoformat()}"
         )
 
 
-# ---------------------------------------------------------
-# MAIN
-# ---------------------------------------------------------
-
 def run_backfill():
     options = load_options()
 
-    entities = options.get("entities", [])
+    entities = options.get(
+        "entities",
+        []
+    )
 
     if not entities:
-        log("Brak skonfigurowanych encji.")
+
+        log(
+            "Brak skonfigurowanych encji."
+        )
+
         return
 
     for entity_id in entities:
+
         try:
+
             backfill_entity(
                 options,
                 entity_id,
             )
+
         except Exception as error:
+
             log(
-                f"BŁĄD {entity_id}: {error}"
+                f"BŁĄD {entity_id}: "
+                f"{error}"
             )
 
 
 def main():
+
     interval_days = int(
         load_options().get(
             "interval_days",
@@ -445,13 +570,20 @@ def main():
     )
 
     while True:
-        log("Rozpoczynam backfill")
+
+        log(
+            "Rozpoczynam backfill"
+        )
 
         try:
+
             run_backfill()
+
         except Exception as error:
+
             log(
-                f"BŁĄD GŁÓWNY: {error}"
+                f"BŁĄD GŁÓWNY: "
+                f"{error}"
             )
 
         log(
@@ -460,7 +592,10 @@ def main():
         )
 
         time.sleep(
-            interval_days * 24 * 60 * 60
+            interval_days
+            * 24
+            * 60
+            * 60
         )
 
 
