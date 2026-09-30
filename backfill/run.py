@@ -17,7 +17,11 @@ def log(message):
 
 
 def load_options():
-    with open(OPTIONS_FILE, "r", encoding="utf-8") as file:
+    with open(
+        OPTIONS_FILE,
+        "r",
+        encoding="utf-8",
+    ) as file:
         return json.load(file)
 
 
@@ -25,7 +29,9 @@ def ha_headers():
     token = os.environ.get("SUPERVISOR_TOKEN")
 
     if not token:
-        raise RuntimeError("Brak SUPERVISOR_TOKEN")
+        raise RuntimeError(
+            "Brak SUPERVISOR_TOKEN"
+        )
 
     return {
         "Authorization": f"Bearer {token}",
@@ -34,7 +40,10 @@ def ha_headers():
 
 
 def get_history(entity_id, start, end):
-    url = f"{HA_API}/history/period/{start.isoformat()}"
+    url = (
+        f"{HA_API}/history/period/"
+        f"{start.isoformat()}"
+    )
 
     params = {
         "filter_entity_id": entity_id,
@@ -64,52 +73,99 @@ def parse_timestamp(value):
     if not value:
         return None
 
-    timestamp = value.replace("Z", "+00:00")
+    timestamp = value.replace(
+        "Z",
+        "+00:00",
+    )
 
     try:
-        dt = datetime.fromisoformat(timestamp)
+        dt = datetime.fromisoformat(
+            timestamp
+        )
     except ValueError:
         return None
 
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(
+            tzinfo=timezone.utc
+        )
 
-    return dt.astimezone(timezone.utc)
+    return dt.astimezone(
+        timezone.utc
+    )
 
 
 def normalize_timestamp(timestamp):
     """
-    Influx zapisujemy z nanosekundami,
-    ale porównujemy timestampy z dokładnością do milisekundy.
+    Normalizuje timestamp do dokładności 1 ms.
+
+    Zaokrąglamy, a nie obcinamy.
+    Jest to ważne, ponieważ timestamp zapisany
+    przez Influx może być np.:
+
+        .901999999
+
+    podczas gdy HA ma:
+
+        .902000
+
+    Po normalizacji oba dają:
+
+        .902000
     """
 
+    milliseconds = round(
+        timestamp.microsecond / 1000
+    )
+
+    if milliseconds >= 1000:
+        timestamp = timestamp + timedelta(
+            seconds=1
+        )
+        milliseconds = 0
+
     return timestamp.replace(
-        microsecond=(timestamp.microsecond // 1000) * 1000
+        microsecond=milliseconds * 1000
     )
 
 
-def influx_headers(token, content_type=None):
+def influx_headers(
+    token,
+    content_type=None,
+):
     headers = {
         "Authorization": f"Token {token}",
     }
 
     if content_type:
-        headers["Content-Type"] = content_type
+        headers["Content-Type"] = (
+            content_type
+        )
 
     return headers
 
 
-def get_existing_timestamps(options, entity_id, start, end):
+def get_existing_timestamps(
+    options,
+    entity_id,
+    start,
+    end,
+):
     """
-    Pobiera wszystkie timestampy istniejące już w InfluxDB
-    dla konkretnej encji.
+    Pobiera timestampy istniejące już
+    w InfluxDB dla konkretnej encji.
 
-    Ważne:
-    - HA entity_id może być np. sensor.lub_pil_6_le10_r264
-    - w Influx entity_id jest lub_pil_6_le10_r264
+    HA:
+        sensor.lub_pil_6_le10_r264
+
+    Influx:
+        lub_pil_6_le10_r264
     """
 
-    influx_url = options["influx_url"].rstrip("/")
+    influx_url = (
+        options["influx_url"].rstrip("/")
+    )
+
     organization = options["influx_org"]
     bucket = options["influx_bucket"]
     token = options["influx_token"]
@@ -117,8 +173,14 @@ def get_existing_timestamps(options, entity_id, start, end):
 
     influx_entity_id = entity_id
 
-    if influx_entity_id.startswith("sensor."):
-        influx_entity_id = influx_entity_id[len("sensor."):]
+    if influx_entity_id.startswith(
+        "sensor."
+    ):
+        influx_entity_id = (
+            influx_entity_id[
+                len("sensor.") :
+            ]
+        )
 
     query = f'''
 from(bucket: "{bucket}")
@@ -126,15 +188,34 @@ from(bucket: "{bucket}")
       start: {start.isoformat()},
       stop: {end.isoformat()}
     )
-  |> filter(fn: (r) => r["_measurement"] == "energy")
-  |> filter(fn: (r) => r["_field"] == "value")
-  |> filter(fn: (r) => r["domain"] == "sensor")
-  |> filter(fn: (r) => r["entity_id"] == "{influx_entity_id}")
-  |> filter(fn: (r) => r["site"] == "{site}")
-  |> keep(columns: ["_time"])
+  |> filter(
+      fn: (r) =>
+        r["_measurement"] == "energy"
+    )
+  |> filter(
+      fn: (r) =>
+        r["_field"] == "value"
+    )
+  |> filter(
+      fn: (r) =>
+        r["domain"] == "sensor"
+    )
+  |> filter(
+      fn: (r) =>
+        r["entity_id"] == "{influx_entity_id}"
+    )
+  |> filter(
+      fn: (r) =>
+        r["site"] == "{site}"
+    )
+  |> keep(
+      columns: ["_time"]
+    )
 '''
 
-    url = f"{influx_url}/api/v2/query"
+    url = (
+        f"{influx_url}/api/v2/query"
+    )
 
     params = {
         "org": organization,
@@ -155,18 +236,16 @@ from(bucket: "{bucket}")
 
     if response.status_code >= 300:
         raise RuntimeError(
-            f"Influx query HTTP {response.status_code}: "
+            f"Influx query HTTP "
+            f"{response.status_code}: "
             f"{response.text}"
         )
 
     existing = set()
 
-    # ---------------------------------------------------------
-    # InfluxDB zwraca CSV z komentarzami/metadata.
-    # Usuwamy linie komentarzy i puste linie.
-    # ---------------------------------------------------------
-
-    raw_lines = response.text.splitlines()
+    raw_lines = (
+        response.text.splitlines()
+    )
 
     csv_lines = []
 
@@ -184,48 +263,38 @@ from(bucket: "{bucket}")
     if not csv_lines:
         return existing
 
-    # ---------------------------------------------------------
-    # Obsługa wielu tabel CSV.
-    #
-    # Influx może zwrócić więcej niż jeden nagłówek:
-    #
-    # _time
-    # ...
-    #
-    # _time
-    # ...
-    #
-    # Dlatego nie zakładamy, że cały wynik jest jednym
-    # klasycznym CSV.
-    # ---------------------------------------------------------
-
     header = None
 
     for line in csv_lines:
 
-        # Szukamy nagłówka zawierającego _time.
+        # Influx może zwrócić wiele tabel,
+        # dlatego może pojawić się wiele nagłówków.
         if "_time" in line.split(","):
 
             header = line.split(",")
 
             continue
 
-        # Jeżeli nie znaleźliśmy jeszcze nagłówka,
-        # pomijamy linię.
         if header is None:
             continue
 
-        values = next(
-            csv.reader(
-                io.StringIO(line)
+        try:
+            values = next(
+                csv.reader(
+                    io.StringIO(line)
+                )
             )
-        )
+        except Exception:
+            continue
 
         if len(values) != len(header):
             continue
 
         row = dict(
-            zip(header, values)
+            zip(
+                header,
+                values,
+            )
         )
 
         value = row.get("_time")
@@ -233,16 +302,22 @@ from(bucket: "{bucket}")
         if not value:
             continue
 
-        timestamp = parse_timestamp(value)
+        timestamp = parse_timestamp(
+            value
+        )
 
         if timestamp is None:
             continue
 
-        normalized = normalize_timestamp(
-            timestamp
+        normalized = (
+            normalize_timestamp(
+                timestamp
+            )
         )
 
-        existing.add(normalized)
+        existing.add(
+            normalized
+        )
 
     return existing
 
@@ -250,15 +325,33 @@ from(bucket: "{bucket}")
 def escape_tag(value):
     return (
         str(value)
-        .replace("\\", "\\\\")
-        .replace(" ", "\\ ")
-        .replace(",", "\\,")
-        .replace("=", "\\=")
+        .replace(
+            "\\",
+            "\\\\",
+        )
+        .replace(
+            " ",
+            "\\ ",
+        )
+        .replace(
+            ",",
+            "\\,",
+        )
+        .replace(
+            "=",
+            "\\=",
+        )
     )
 
 
-def write_to_influx(options, points):
-    influx_url = options["influx_url"].rstrip("/")
+def write_to_influx(
+    options,
+    points,
+):
+    influx_url = (
+        options["influx_url"].rstrip("/")
+    )
+
     organization = options["influx_org"]
     bucket = options["influx_bucket"]
     token = options["influx_token"]
@@ -268,12 +361,20 @@ def write_to_influx(options, points):
             "Brak tokenu InfluxDB"
         )
 
-    url = f"{influx_url}/api/v2/write"
+    url = (
+        f"{influx_url}/api/v2/write"
+    )
 
     headers = {
-        "Authorization": f"Token {token}",
-        "Content-Type": "text/plain; charset=utf-8",
-        "Accept": "application/json",
+        "Authorization": (
+            f"Token {token}"
+        ),
+        "Content-Type": (
+            "text/plain; charset=utf-8"
+        ),
+        "Accept": (
+            "application/json"
+        ),
     }
 
     params = {
@@ -292,29 +393,83 @@ def write_to_influx(options, points):
 
     if response.status_code >= 300:
         raise RuntimeError(
-            f"InfluxDB HTTP {response.status_code}: "
+            f"InfluxDB HTTP "
+            f"{response.status_code}: "
             f"{response.text}"
         )
 
 
-def build_line(entity_id, site, state, timestamp):
+def timestamp_to_nanoseconds(timestamp):
+    """
+    Konwersja datetime -> Unix nanoseconds
+    bez używania float.
+
+    Dzięki temu unikamy problemu:
+
+        timestamp.timestamp()
+        * 1_000_000_000
+
+    który może powodować błąd precyzji.
+    """
+
+    epoch = datetime(
+        1970,
+        1,
+        1,
+        tzinfo=timezone.utc,
+    )
+
+    delta = timestamp - epoch
+
+    return (
+        delta.days
+        * 86_400
+        * 1_000_000_000
+        + delta.seconds
+        * 1_000_000_000
+        + delta.microseconds
+        * 1_000
+    )
+
+
+def build_line(
+    entity_id,
+    site,
+    state,
+    timestamp,
+):
     value = float(state)
 
     measurement = "energy"
 
     influx_entity_id = entity_id
 
-    if influx_entity_id.startswith("sensor."):
-        influx_entity_id = influx_entity_id[len("sensor."):]
+    if influx_entity_id.startswith(
+        "sensor."
+    ):
+        influx_entity_id = (
+            influx_entity_id[
+                len("sensor.") :
+            ]
+        )
 
     tags = (
-        f"domain=sensor,"
-        f"entity_id={escape_tag(influx_entity_id)},"
+        "domain=sensor,"
+        f"entity_id="
+        f"{escape_tag(influx_entity_id)},"
         f"site={escape_tag(site)}"
     )
 
-    timestamp_ns = int(
-        timestamp.timestamp() * 1_000_000_000
+    # Zawsze zapisujemy timestamp
+    # po normalizacji do 1 ms.
+    timestamp = normalize_timestamp(
+        timestamp
+    )
+
+    timestamp_ns = (
+        timestamp_to_nanoseconds(
+            timestamp
+        )
     )
 
     return (
@@ -324,7 +479,10 @@ def build_line(entity_id, site, state, timestamp):
     )
 
 
-def backfill_entity(options, entity_id):
+def backfill_entity(
+    options,
+    entity_id,
+):
     days = int(
         options.get(
             "days",
@@ -338,8 +496,11 @@ def backfill_entity(options, entity_id):
         timezone.utc
     )
 
-    start = end - timedelta(
-        days=days
+    start = (
+        end
+        - timedelta(
+            days=days
+        )
     )
 
     log(
@@ -349,7 +510,7 @@ def backfill_entity(options, entity_id):
     )
 
     # ---------------------------------------------------------
-    # 1. Pobierz historię z Home Assistant
+    # 1. Historia Home Assistant
     # ---------------------------------------------------------
 
     history = get_history(
@@ -364,6 +525,7 @@ def backfill_entity(options, entity_id):
     )
 
     if not history:
+
         log(
             f"{entity_id}: brak danych "
             f"w historii HA"
@@ -372,7 +534,7 @@ def backfill_entity(options, entity_id):
         return
 
     # ---------------------------------------------------------
-    # 2. Pobierz istniejące timestampy z Influx
+    # 2. Istniejące punkty Influx
     # ---------------------------------------------------------
 
     existing_timestamps = (
@@ -390,10 +552,7 @@ def backfill_entity(options, entity_id):
     )
 
     # ---------------------------------------------------------
-    # 3. Przygotuj dane z HA
-    #
-    # Jeżeli HA zwróci ten sam timestamp więcej niż raz,
-    # zostawiamy jeden punkt.
+    # 3. Przygotowanie historii HA
     # ---------------------------------------------------------
 
     history_by_timestamp = {}
@@ -432,19 +591,23 @@ def backfill_entity(options, entity_id):
         if timestamp is None:
             continue
 
-        normalized = normalize_timestamp(
-            timestamp
+        # Normalizujemy timestamp HA
+        # przed porównaniem i przed zapisem.
+        normalized = (
+            normalize_timestamp(
+                timestamp
+            )
         )
 
         history_by_timestamp[
             normalized
         ] = (
             state,
-            timestamp,
+            normalized,
         )
 
     # ---------------------------------------------------------
-    # 4. Znajdź tylko punkty, których NIE MA w Influx
+    # 4. Wyszukanie brakujących punktów
     # ---------------------------------------------------------
 
     lines = []
@@ -479,7 +642,7 @@ def backfill_entity(options, entity_id):
         )
 
     # ---------------------------------------------------------
-    # 5. Nic nie brakuje
+    # 5. Brak brakujących punktów
     # ---------------------------------------------------------
 
     if not lines:
@@ -492,7 +655,7 @@ def backfill_entity(options, entity_id):
         return
 
     # ---------------------------------------------------------
-    # 6. Zapis brakujących punktów do Influx
+    # 6. Zapis do Influx
     # ---------------------------------------------------------
 
     write_to_influx(
@@ -506,7 +669,7 @@ def backfill_entity(options, entity_id):
     )
 
     # ---------------------------------------------------------
-    # 7. Log zakresu uzupełnienia
+    # 7. Zakres uzupełnienia
     # ---------------------------------------------------------
 
     if missing_timestamps:
@@ -532,7 +695,7 @@ def run_backfill():
 
     entities = options.get(
         "entities",
-        []
+        [],
     )
 
     if not entities:
