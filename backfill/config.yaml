@@ -1,26 +1,25 @@
 name: "SmartHop Backfill"
 version: "0.1.0"
-slug: "smarthop_backfill"
+slug: "backfill"
 description: "Automatic backfill of Home Assistant history to InfluxDB."
 url: "https://github.com/adminsmarthop/smarthop-backfill"
 
-startup: services
+startup: application
 boot: auto
 init: false
 
 arch:
   - amd64
   - aarch64
-  - armv7
 
 homeassistant_api: true
 
 options:
-  influx_url: ""
-  influx_org: ""
-  influx_bucket: ""
-  influx_token: ""
-  site: ""
+  influx_url: null
+  influx_org: null
+  influx_bucket: null
+  influx_token: null
+  site: null
   days: 30
   interval_days: 7
   entities: []
