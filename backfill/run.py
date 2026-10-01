@@ -13,7 +13,8 @@ HA_API = "http://supervisor/core/api"
 
 
 def log(message):
-    print(f"[SmartHop Backfill] {message}", flush=True)
+    now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{now}] {message}", flush=True)
 
 
 def load_options():
